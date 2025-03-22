@@ -6,7 +6,7 @@ ECR_REPO_NAME="golang/gin-redis"
 AWS_REGION="ap-northeast-1"
 AWS_ACCOUNT_ID="263386971159"
 ECS_CLUSTER_NAME="gin-redis-cluster"
-ECS_SERVICE_NAME="gin-redis-service"
+ECS_SERVICE_NAME="gin-server-service"
 
 # check or create ecr repo
 if ! aws ecr describe-repositories --repository-names $ECR_REPO_NAME --region $AWS_REGION &> /dev/null; then

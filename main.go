@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -83,12 +84,40 @@ func heavyMessage(c *gin.Context) {
 		"duration": duration.Seconds(), // Duration in seconds
 	})
 }
+func prune(c *gin.Context) {
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	clear(cache)
+	clear(hitCountMap)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Cache and hit count cleaned up successfully",
+	})
+}
+
+func health(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Yes, I'm woking",
+	})
+}
 
 func main() {
 	// gin framework
 	r := gin.Default()
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{"GET"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * 60 * 60,
+	}))
 
 	r.GET("/heavy", heavyMessage)
+	r.GET("/prune", prune)
+	r.GET("/", health)
 
 	r.Run(":80")
 }

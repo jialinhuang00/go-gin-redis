@@ -1,5 +1,5 @@
 # Step 1: golang server builder, for step 2 COPY
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
