@@ -1,24 +1,24 @@
 package main
 
 import (
-	"context"
-	"log"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-redis/redis/v8"
 )
 
-var rdb *redis.Client
-var ctx = context.Background()
+var cache = make(map[string]string)    // redis-like
+var hitCountMap = make(map[string]int) // frequency check
+var mu sync.RWMutex                    // locker
 
 func simulateHeavyComputation() int {
 	// just sleep LOL
 	time.Sleep(5 * time.Second)
 	return 42
 }
+
 func heavyMessage(c *gin.Context) {
 	// Start the timer to calculate the duration
 	startTime := time.Now()
@@ -26,56 +26,48 @@ func heavyMessage(c *gin.Context) {
 	cacheKey := "heavy-message"
 	hitCountKey := cacheKey + "-hits"
 
-	// Remember how many times the GET `/heavy` endpoint was hit
-	hitCount, err := rdb.Get(ctx, hitCountKey).Result()
+	// read lock for reading
+	mu.RLock()
+	hitCount, exists := hitCountMap[hitCountKey]
+	mu.RUnlock()
 
-	// If nil, set the counter to 0
-	if err == redis.Nil {
-		hitCount = "0"
-	} else if err != nil {
-		log.Println("Redis get error:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Redis error"})
-		return
+	// If no hits found, initialize it
+	if !exists {
+		hitCount = 0
 	}
-
-	// Convert str to integer
-	hitCountInt, _ := strconv.Atoi(hitCount)
 
 	var message string
 	var source string
 
 	// Logic to handle cache and computation
-	if hitCountInt >= 1 {
-		cachedMessage, err := rdb.Get(ctx, cacheKey).Result()
-		if err == redis.Nil {
-			// If no cache, return the result and store in Redis
+	if hitCount >= 1 {
+		// read lock for reading
+		mu.RLock()
+		cachedMessage, cached := cache[cacheKey]
+		mu.RUnlock()
+
+		if !cached {
+			// If no cache, return the result and store in cache
 			result := simulateHeavyComputation()
-			err := rdb.Set(ctx, cacheKey, strconv.Itoa(result), 0).Err()
-			if err != nil {
-				log.Println("Redis set error:", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Redis set error"})
-				return
-			}
+			// read-write lock for writing
+			mu.Lock()
+			cache[cacheKey] = strconv.Itoa(result)
+			mu.Unlock()
 			message = strconv.Itoa(result)
 			source = "computed and stored in cache"
-		} else if err != nil {
-			log.Println("Redis get error:", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Redis error"})
 		} else {
-			// If matched, return from Redis cache
+			// If matched, return from cache
 			message = cachedMessage
 			source = "cache"
 		}
 	} else {
 		// It's your first time accessing
-		err := rdb.Set(ctx, hitCountKey, hitCountInt+1, 0).Err()
-		if err != nil {
-			log.Println("Redis set error:", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Redis error"})
-			return
-		}
+		// read-write lock for writing
+		mu.Lock()
+		hitCountMap[hitCountKey] = hitCount + 1
+		mu.Unlock()
 
-		// Might be a one-time access, don’t store in Redis yet
+		// Might be a one-time access, do not store in cache!
 		result := simulateHeavyComputation()
 		message = strconv.Itoa(result)
 		source = "computed without cache (first access)"
@@ -93,11 +85,6 @@ func heavyMessage(c *gin.Context) {
 }
 
 func main() {
-	// init redis
-	rdb = redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-		DB:   0,
-	})
 	// gin framework
 	r := gin.Default()
 
