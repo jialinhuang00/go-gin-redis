@@ -23,17 +23,17 @@
 # Or Live
 0. health-check 
     ```
-    curl gin-redis.jia00.com/
+    curl https://gin.jialin00.com/
     ```
 1. try getting time-consuming resource
     ```
-    curl gin-redis.jia00.com/heavy
+    curl https://gin.jialin00.com/heavy
     ```
 2. cleanup
     ```
-    curl gin-redis.jia00.com/prune
+    curl https://gin.jialin00.com/prune
     ```
 
 # Or Website
-https://jia00.com/gin-redis
+https://jialin00.com/gin-redis
  
