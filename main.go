@@ -103,5 +103,5 @@ func main() {
 
 	r.GET("/heavy", heavyMessage)
 
-	r.Run(":8080")
+	r.Run(":80")
 }
