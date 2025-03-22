@@ -19,15 +19,17 @@ func simulateHeavyComputation() int {
 	time.Sleep(5 * time.Second)
 	return 42
 }
-
 func heavyMessage(c *gin.Context) {
+	// Start the timer to calculate the duration
+	startTime := time.Now()
+
 	cacheKey := "heavy-message"
 	hitCountKey := cacheKey + "-hits"
 
-	// remember how many times that GET `/heavy` endpoint
+	// Remember how many times the GET `/heavy` endpoint was hit
 	hitCount, err := rdb.Get(ctx, hitCountKey).Result()
 
-	// if nil, set counter to 0
+	// If nil, set the counter to 0
 	if err == redis.Nil {
 		hitCount = "0"
 	} else if err != nil {
@@ -36,13 +38,17 @@ func heavyMessage(c *gin.Context) {
 		return
 	}
 
-	// convert str to integer
+	// Convert str to integer
 	hitCountInt, _ := strconv.Atoi(hitCount)
 
+	var message string
+	var source string
+
+	// Logic to handle cache and computation
 	if hitCountInt >= 1 {
 		cachedMessage, err := rdb.Get(ctx, cacheKey).Result()
 		if err == redis.Nil {
-			// if no cache, return the result and store in redis
+			// If no cache, return the result and store in Redis
 			result := simulateHeavyComputation()
 			err := rdb.Set(ctx, cacheKey, strconv.Itoa(result), 0).Err()
 			if err != nil {
@@ -50,22 +56,18 @@ func heavyMessage(c *gin.Context) {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Redis set error"})
 				return
 			}
-			c.JSON(http.StatusOK, gin.H{
-				"message": result,
-				"source":  "computed and stored in cache",
-			})
+			message = strconv.Itoa(result)
+			source = "computed and stored in cache"
 		} else if err != nil {
 			log.Println("Redis get error:", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Redis error"})
 		} else {
-			// if matched, return from redis cache
-			c.JSON(http.StatusOK, gin.H{
-				"message": cachedMessage,
-				"source":  "cache",
-			})
+			// If matched, return from Redis cache
+			message = cachedMessage
+			source = "cache"
 		}
 	} else {
-		// it's your first time to get here
+		// It's your first time accessing
 		err := rdb.Set(ctx, hitCountKey, hitCountInt+1, 0).Err()
 		if err != nil {
 			log.Println("Redis set error:", err)
@@ -73,14 +75,21 @@ func heavyMessage(c *gin.Context) {
 			return
 		}
 
-		// might be a one-time access
-		// don’t need to store it in Redis yet,
+		// Might be a one-time access, don’t store in Redis yet
 		result := simulateHeavyComputation()
-		c.JSON(http.StatusOK, gin.H{
-			"message": result,
-			"source":  "computed without cache (first access)",
-		})
+		message = strconv.Itoa(result)
+		source = "computed without cache (first access)"
 	}
+
+	// Calculate the duration from request to response
+	duration := time.Since(startTime)
+
+	// Return the response with the duration
+	c.JSON(http.StatusOK, gin.H{
+		"message":  message,
+		"source":   source,
+		"duration": duration.Seconds(), // Duration in seconds
+	})
 }
 
 func main() {
