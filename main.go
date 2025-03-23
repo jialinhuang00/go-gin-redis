@@ -1,8 +1,9 @@
 package main
 
 import (
+	"container/list"
+	"fmt"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -10,101 +11,236 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-var cache = make(map[string]string)    // redis-like
-var hitCountMap = make(map[string]int) // frequency check
-var mu sync.RWMutex                    // locker
+// N
+const CACHE_SIZE = 5
 
-func simulateHeavyComputation() int {
-	// just sleep LOL
-	time.Sleep(5 * time.Second)
-	return 42
+type CacheEntry struct {
+	key             string
+	value           string
+	consecutiveHits int
+	isBeingUsed     bool
+}
+
+type Cache struct {
+	mu           sync.RWMutex
+	items        map[string]*list.Element
+	evictionList *list.List // LRU
+	accessOrder  map[string]time.Time
+}
+
+func NewCache() *Cache {
+	return &Cache{
+		items:        make(map[string]*list.Element),
+		evictionList: list.New(),
+		accessOrder:  make(map[string]time.Time),
+	}
+}
+
+func (c *Cache) Get(key string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if element, exists := c.items[key]; exists {
+		entry := element.Value.(*CacheEntry)
+		entry.consecutiveHits++
+
+		if entry.consecutiveHits >= 2 {
+			entry.isBeingUsed = true
+		}
+
+		c.evictionList.MoveToFront(element)
+		c.accessOrder[key] = time.Now()
+
+		return entry.value, true
+	}
+	return "", false
+}
+
+func (c *Cache) Set(key, value string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if element, exists := c.items[key]; exists {
+		c.evictionList.MoveToFront(element)
+		entry := element.Value.(*CacheEntry)
+		entry.value = value
+		c.accessOrder[key] = time.Now()
+		return
+	}
+
+	// no room to store, delete one
+	if c.evictionList.Len() >= CACHE_SIZE {
+		c.evictOne()
+	}
+
+	entry := &CacheEntry{
+		key:             key,
+		value:           value,
+		consecutiveHits: 1,
+		isBeingUsed:     false,
+	}
+
+	element := c.evictionList.PushFront(entry)
+	c.items[key] = element
+	c.accessOrder[key] = time.Now()
+}
+
+func (c *Cache) evictOne() {
+
+	// delete existing but not being used.
+	for e := c.evictionList.Back(); e != nil; e = e.Prev() {
+		entry := e.Value.(*CacheEntry)
+		if !entry.isBeingUsed {
+			c.evictionList.Remove(e)
+			delete(c.items, entry.key)
+			delete(c.accessOrder, entry.key)
+			return
+		}
+	}
+	// if all are being used, just check the last one.
+	if element := c.evictionList.Back(); element != nil {
+		entry := element.Value.(*CacheEntry)
+		c.evictionList.Remove(element)
+		delete(c.items, entry.key)
+		delete(c.accessOrder, entry.key)
+	}
+}
+
+func (c *Cache) ResetConsecutiveHits(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if element, exists := c.items[key]; exists {
+		entry := element.Value.(*CacheEntry)
+		entry.consecutiveHits = 1
+		entry.isBeingUsed = false
+	}
+}
+
+func (c *Cache) GetStatus() []map[string]interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	status := make([]map[string]any, 0, c.evictionList.Len())
+
+	for e := c.evictionList.Front(); e != nil; e = e.Next() {
+		entry := e.Value.(*CacheEntry)
+		item := map[string]any{
+			"key":             entry.key,
+			"consecutiveHits": entry.consecutiveHits,
+			"isBeingUsed":     entry.isBeingUsed,
+			"lastAccessed":    c.accessOrder[entry.key],
+		}
+		status = append(status, item)
+	}
+
+	return status
+}
+
+func (c *Cache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.items = make(map[string]*list.Element)
+	c.evictionList = list.New()
+	c.accessOrder = make(map[string]time.Time)
+}
+
+var cacheManager = NewCache()
+var lastAccessedKeys = make(map[string]time.Time)
+var lastAccessMu sync.RWMutex
+
+func simulateHeavyComputation(key string) string {
+	time.Sleep(3 * time.Second)
+	return fmt.Sprintf("heavy message %s", key)
 }
 
 func heavyMessage(c *gin.Context) {
-	// Start the timer to calculate the duration
 	startTime := time.Now()
 
-	cacheKey := "heavy-message"
-	hitCountKey := cacheKey + "-hits"
+	messageKey := c.DefaultQuery("key", "default")
+	cacheKey := fmt.Sprintf("heavy-message-%s", messageKey)
 
-	// read lock for reading
-	mu.RLock()
-	hitCount, exists := hitCountMap[hitCountKey]
-	mu.RUnlock()
+	lastAccessMu.RLock()
+	lastAccess, exists := lastAccessedKeys[cacheKey]
+	lastAccessMu.RUnlock()
 
-	// If no hits found, initialize it
-	if !exists {
-		hitCount = 0
+	// outdated or doesn't exist?
+	if !exists || time.Since(lastAccess) > 30*time.Second {
+		cacheManager.ResetConsecutiveHits(cacheKey)
 	}
+
+	lastAccessMu.Lock()
+	lastAccessedKeys[cacheKey] = time.Now()
+	lastAccessMu.Unlock()
+
+	// check cache first
+	cachedMessage, hit := cacheManager.Get(cacheKey)
 
 	var message string
 	var source string
 
-	// Logic to handle cache and computation
-	if hitCount >= 1 {
-		// read lock for reading
-		mu.RLock()
-		cachedMessage, cached := cache[cacheKey]
-		mu.RUnlock()
-
-		if !cached {
-			// If no cache, return the result and store in cache
-			result := simulateHeavyComputation()
-			// read-write lock for writing
-			mu.Lock()
-			cache[cacheKey] = strconv.Itoa(result)
-			mu.Unlock()
-			message = strconv.Itoa(result)
-			source = "computed and stored in cache"
-		} else {
-			// If matched, return from cache
-			message = cachedMessage
-			source = "cache"
-		}
+	if hit {
+		message = cachedMessage
+		source = "cache"
 	} else {
-		// It's your first time accessing
-		// read-write lock for writing
-		mu.Lock()
-		hitCountMap[hitCountKey] = hitCount + 1
-		mu.Unlock()
+		message = simulateHeavyComputation(messageKey)
 
-		// Might be a one-time access, do not store in cache!
-		result := simulateHeavyComputation()
-		message = strconv.Itoa(result)
-		source = "computed without cache (first access)"
+		cacheManager.Set(cacheKey, message)
+		source = "computed and stored in cache"
 	}
 
-	// Calculate the duration from request to response
 	duration := time.Since(startTime)
 
-	// Return the response with the duration
+	isBeingUsed := false
+	consecutiveHits := 0
+	cacheManager.mu.RLock()
+	if element, exists := cacheManager.items[cacheKey]; exists {
+		entry := element.Value.(*CacheEntry)
+		isBeingUsed = entry.isBeingUsed
+		consecutiveHits = entry.consecutiveHits
+	}
+	cacheManager.mu.RUnlock()
+
 	c.JSON(http.StatusOK, gin.H{
-		"message":  message,
-		"source":   source,
-		"duration": duration.Seconds(), // Duration in seconds
+		"key":             messageKey,
+		"message":         message,
+		"source":          source,
+		"duration":        duration.Seconds(),
+		"isBeingUsed":     isBeingUsed,
+		"consecutiveHits": consecutiveHits,
+		"cacheSize":       cacheManager.evictionList.Len(),
+		"maxSize":         CACHE_SIZE,
 	})
 }
+
+func status(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"cacheStatus": cacheManager.GetStatus(),
+		"cacheSize":   cacheManager.evictionList.Len(),
+		"maxSize":     CACHE_SIZE,
+	})
+}
+
 func prune(c *gin.Context) {
+	cacheManager.Clear()
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	clear(cache)
-	clear(hitCountMap)
+	lastAccessMu.Lock()
+	lastAccessedKeys = make(map[string]time.Time)
+	lastAccessMu.Unlock()
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Cache and hit count cleaned up successfully",
+		"message": "Cache cleaned up successfully",
 	})
 }
 
 func health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Yes, I'm woking",
+		"message": "Yes, I'm working",
 	})
 }
 
 func main() {
-	// gin framework
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"*"},
@@ -116,6 +252,7 @@ func main() {
 	}))
 
 	r.GET("/heavy", heavyMessage)
+	r.GET("/status", status)
 	r.GET("/prune", prune)
 	r.GET("/", health)
 

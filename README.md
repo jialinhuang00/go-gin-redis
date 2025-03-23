@@ -27,11 +27,16 @@
     ```
 1. try getting time-consuming resource
     ```
-    curl https://gin.jialin00.com/heavy
+    curl https://gin.jialin00.com/heavy?key=whateveryyouwant
     ```
 2. cleanup
     ```
     curl https://gin.jialin00.com/prune
+    ```
+
+2. get cache status
+    ```
+    curl https://gin.jialin00.com/status
     ```
 
 # Or Website
