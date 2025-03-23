@@ -14,6 +14,9 @@ import (
 // N
 const CACHE_SIZE = 5
 
+var expirationTime = 30 * time.Second
+var expirationTimeMu sync.RWMutex
+
 type CacheEntry struct {
 	key             string
 	value           string
@@ -70,7 +73,7 @@ func (c *Cache) Set(key, value string) {
 
 	// no room to store, delete one
 	if c.evictionList.Len() >= CACHE_SIZE {
-		c.evictOne()
+		c.EvictOne()
 	}
 
 	entry := &CacheEntry{
@@ -85,8 +88,7 @@ func (c *Cache) Set(key, value string) {
 	c.accessOrder[key] = time.Now()
 }
 
-func (c *Cache) evictOne() {
-
+func (c *Cache) EvictOne() {
 	// delete existing but not being used.
 	for e := c.evictionList.Back(); e != nil; e = e.Prev() {
 		entry := e.Value.(*CacheEntry)
@@ -109,7 +111,7 @@ func (c *Cache) evictOne() {
 func (c *Cache) ResetConsecutiveHits(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
+	fmt.Print("its outdated reset hit = 1", key)
 	if element, exists := c.items[key]; exists {
 		entry := element.Value.(*CacheEntry)
 		entry.consecutiveHits = 1
@@ -117,7 +119,7 @@ func (c *Cache) ResetConsecutiveHits(key string) {
 	}
 }
 
-func (c *Cache) GetStatus() []map[string]interface{} {
+func (c *Cache) GetStatus() []map[string]any {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -155,6 +157,7 @@ func simulateHeavyComputation(key string) string {
 	return fmt.Sprintf("heavy message %s", key)
 }
 
+// handler
 func heavyMessage(c *gin.Context) {
 	startTime := time.Now()
 
@@ -162,45 +165,74 @@ func heavyMessage(c *gin.Context) {
 	cacheKey := fmt.Sprintf("heavy-message-%s", messageKey)
 
 	lastAccessMu.RLock()
-	lastAccess, exists := lastAccessedKeys[cacheKey]
+	lastAccess, lastAccessExists := lastAccessedKeys[cacheKey]
 	lastAccessMu.RUnlock()
 
-	// outdated or doesn't exist?
-	if !exists || time.Since(lastAccess) > 30*time.Second {
-		cacheManager.ResetConsecutiveHits(cacheKey)
-	}
+	// Get current expiration time
+	expirationTimeMu.RLock()
+	currentExpirationTime := expirationTime
+	expirationTimeMu.RUnlock()
 
+	// update last access time
 	lastAccessMu.Lock()
 	lastAccessedKeys[cacheKey] = time.Now()
 	lastAccessMu.Unlock()
 
-	// check cache first
-	cachedMessage, hit := cacheManager.Get(cacheKey)
-
 	var message string
 	var source string
+	var isBeingUsed bool = false
+	var consecutiveHits int = 0
+
+	cacheManager.mu.Lock()
+	element, hit := cacheManager.items[cacheKey]
 
 	if hit {
-		message = cachedMessage
+		entry := element.Value.(*CacheEntry)
+
+		// if it's oudated or doesn't exist?
+		if !lastAccessExists || time.Since(lastAccess) > currentExpirationTime {
+			entry.consecutiveHits = 1
+			entry.isBeingUsed = false
+			fmt.Print("its outdated reset hit = 1", cacheKey)
+			// its' fresh
+		} else {
+			entry.consecutiveHits++
+		}
+
+		message = entry.value
 		source = "cache"
+		consecutiveHits = entry.consecutiveHits
+
+		if entry.consecutiveHits >= 2 {
+			entry.isBeingUsed = true
+		}
+		isBeingUsed = entry.isBeingUsed
+
+		cacheManager.evictionList.MoveToFront(element)
+		cacheManager.accessOrder[cacheKey] = time.Now()
 	} else {
 		message = simulateHeavyComputation(messageKey)
-
-		cacheManager.Set(cacheKey, message)
 		source = "computed and stored in cache"
+
+		if cacheManager.evictionList.Len() >= CACHE_SIZE {
+			cacheManager.EvictOne()
+		}
+
+		entry := &CacheEntry{
+			key:             cacheKey,
+			value:           message,
+			consecutiveHits: 1,
+			isBeingUsed:     false,
+		}
+
+		element = cacheManager.evictionList.PushFront(entry)
+		cacheManager.items[cacheKey] = element
+		consecutiveHits = 1
+		cacheManager.accessOrder[cacheKey] = time.Now()
 	}
+	cacheManager.mu.Unlock()
 
 	duration := time.Since(startTime)
-
-	isBeingUsed := false
-	consecutiveHits := 0
-	cacheManager.mu.RLock()
-	if element, exists := cacheManager.items[cacheKey]; exists {
-		entry := element.Value.(*CacheEntry)
-		isBeingUsed = entry.isBeingUsed
-		consecutiveHits = entry.consecutiveHits
-	}
-	cacheManager.mu.RUnlock()
 
 	c.JSON(http.StatusOK, gin.H{
 		"key":             messageKey,
@@ -214,14 +246,55 @@ func heavyMessage(c *gin.Context) {
 	})
 }
 
-func status(c *gin.Context) {
+// New endpoint to set expiration time
+func setExpirationTime(c *gin.Context) {
+	var request struct {
+		Time int `json:"time" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid input. Please provide a valid 'time' value in seconds.",
+		})
+		return
+	}
+
+	// Validate time is reasonable (e.g., not negative or too large)
+	if request.Time <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Time must be a positive value in seconds.",
+		})
+		return
+	}
+
+	// Set the new expiration time
+	expirationTimeMu.Lock()
+	expirationTime = time.Duration(request.Time) * time.Second
+	expirationTimeMu.Unlock()
+
 	c.JSON(http.StatusOK, gin.H{
-		"cacheStatus": cacheManager.GetStatus(),
-		"cacheSize":   cacheManager.evictionList.Len(),
-		"maxSize":     CACHE_SIZE,
+		"message":        "Expiration time updated successfully",
+		"expirationTime": request.Time,
+		"unit":           "seconds",
 	})
 }
 
+// get setup and current cache status
+func status(c *gin.Context) {
+	// Get current expiration time
+	expirationTimeMu.RLock()
+	currentExpirationTime := expirationTime
+	expirationTimeMu.RUnlock()
+
+	c.JSON(http.StatusOK, gin.H{
+		"cacheStatus":    cacheManager.GetStatus(),
+		"cacheSize":      cacheManager.evictionList.Len(),
+		"maxSize":        CACHE_SIZE,
+		"expirationTime": int(currentExpirationTime.Seconds()),
+	})
+}
+
+// clean all
 func prune(c *gin.Context) {
 	cacheManager.Clear()
 
@@ -234,6 +307,7 @@ func prune(c *gin.Context) {
 	})
 }
 
+// just a health check
 func health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Yes, I'm working",
@@ -244,7 +318,7 @@ func main() {
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"*"},
-		AllowMethods:     []string{"GET"},
+		AllowMethods:     []string{"GET", "POST"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept"},
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
@@ -255,6 +329,7 @@ func main() {
 	r.GET("/status", status)
 	r.GET("/prune", prune)
 	r.GET("/", health)
+	r.POST("/expirationTime", setExpirationTime)
 
 	r.Run(":80")
 }

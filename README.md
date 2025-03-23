@@ -1,26 +1,11 @@
-# Prepare Redis (for MacOS)
-
-0. brew install redis
-1. brew services start redis
-2. redis-cli flushall (cleanup)
-
 # Download and run
-0. clone this
+0. clone
 1. go mod tidy (if needed)
 2. go run main go
-3. program itself is already connected to redis (no worries)
 
-# Open new Terminal
+# Curl
+local run: `curl localhost`
 
-0. curl "http://localhost:8080/heavy" (repeatedly)
-    1. first time access: 5 sec
-    2. second time access: 5 sec
-    3. else: 0.0003 sec
-1. you might want to try again 
-    1. redis-cli flushall
-
-
-# Or Live
 0. health-check 
     ```
     curl https://gin.jialin00.com/
@@ -37,6 +22,13 @@
 2. get cache status
     ```
     curl https://gin.jialin00.com/status
+    ```
+3. set expiration time
+    ```
+    curl -X POST \
+    http://gin.jialin00.com/expirationTime \
+    -H 'Content-Type: application/json' \
+    -d '{"time": 8}'
     ```
 
 # Or Website
