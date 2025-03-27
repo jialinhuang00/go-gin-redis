@@ -11,9 +11,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// N
+// N, it doesn't expose to the API interface.
 const CACHE_SIZE = 5
 
+// It can be changed by the API.
 var expirationTime = 30 * time.Second
 var expirationTimeMu sync.RWMutex
 
