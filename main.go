@@ -213,22 +213,8 @@ func heavyMessage(c *gin.Context) {
 	} else {
 		message = simulateHeavyComputation(messageKey)
 		source = "computed and stored in cache"
-
-		if cacheManager.evictionList.Len() >= CACHE_SIZE {
-			cacheManager.EvictOne()
-		}
-
-		entry := &CacheEntry{
-			key:             cacheKey,
-			value:           message,
-			consecutiveHits: 1,
-			isBeingUsed:     false,
-		}
-
-		element = cacheManager.evictionList.PushFront(entry)
-		cacheManager.items[cacheKey] = element
+		cacheManager.Set(cacheKey, message)
 		consecutiveHits = 1
-		cacheManager.lastAccessTime[cacheKey] = time.Now()
 	}
 	cacheManager.mu.Unlock()
 
