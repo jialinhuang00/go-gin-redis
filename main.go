@@ -39,37 +39,9 @@ func NewCache() *Cache {
 	}
 }
 
-func (c *Cache) Get(key string) (string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if element, exists := c.items[key]; exists {
-		entry := element.Value.(*CacheEntry)
-		entry.consecutiveHits++
-
-		if entry.consecutiveHits >= 2 {
-			entry.isBeingUsed = true
-		}
-
-		c.evictionList.MoveToFront(element)
-		c.lastAccessTime[key] = time.Now()
-
-		return entry.value, true
-	}
-	return "", false
-}
-
-func (c *Cache) Set(key, value string) {
+func (c *Cache) Add(key, value string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if element, exists := c.items[key]; exists {
-		c.evictionList.MoveToFront(element)
-		entry := element.Value.(*CacheEntry)
-		entry.value = value
-		c.lastAccessTime[key] = time.Now()
-		return
-	}
 
 	// no room to store, delete one
 	if c.evictionList.Len() >= CACHE_SIZE {
@@ -105,16 +77,6 @@ func (c *Cache) EvictOne() {
 		c.evictionList.Remove(element)
 		delete(c.items, entry.key)
 		delete(c.lastAccessTime, entry.key)
-	}
-}
-
-func (c *Cache) ResetConsecutiveHits(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if element, exists := c.items[key]; exists {
-		entry := element.Value.(*CacheEntry)
-		entry.consecutiveHits = 1
-		entry.isBeingUsed = false
 	}
 }
 
@@ -203,7 +165,7 @@ func heavyMessage(c *gin.Context) {
 	if !hit {
 		message = simulateHeavyComputation(messageKey)
 		source = "computed and stored in cache"
-		cacheManager.Set(cacheKey, message)
+		cacheManager.Add(cacheKey, message)
 		consecutiveHits = 1
 	}
 
