@@ -25,17 +25,17 @@ type CacheEntry struct {
 }
 
 type Cache struct {
-	mu           sync.RWMutex
-	items        map[string]*list.Element
-	evictionList *list.List // LRU
-	accessOrder  map[string]time.Time
+	mu             sync.RWMutex
+	items          map[string]*list.Element
+	evictionList   *list.List // LRU
+	lastAccessTime map[string]time.Time
 }
 
 func NewCache() *Cache {
 	return &Cache{
-		items:        make(map[string]*list.Element),
-		evictionList: list.New(),
-		accessOrder:  make(map[string]time.Time),
+		items:          make(map[string]*list.Element),
+		evictionList:   list.New(),
+		lastAccessTime: make(map[string]time.Time),
 	}
 }
 
@@ -52,7 +52,7 @@ func (c *Cache) Get(key string) (string, bool) {
 		}
 
 		c.evictionList.MoveToFront(element)
-		c.accessOrder[key] = time.Now()
+		c.lastAccessTime[key] = time.Now()
 
 		return entry.value, true
 	}
@@ -67,7 +67,7 @@ func (c *Cache) Set(key, value string) {
 		c.evictionList.MoveToFront(element)
 		entry := element.Value.(*CacheEntry)
 		entry.value = value
-		c.accessOrder[key] = time.Now()
+		c.lastAccessTime[key] = time.Now()
 		return
 	}
 
@@ -85,7 +85,7 @@ func (c *Cache) Set(key, value string) {
 
 	element := c.evictionList.PushFront(entry)
 	c.items[key] = element
-	c.accessOrder[key] = time.Now()
+	c.lastAccessTime[key] = time.Now()
 }
 
 func (c *Cache) EvictOne() {
@@ -95,7 +95,7 @@ func (c *Cache) EvictOne() {
 		if !entry.isBeingUsed {
 			c.evictionList.Remove(e)
 			delete(c.items, entry.key)
-			delete(c.accessOrder, entry.key)
+			delete(c.lastAccessTime, entry.key)
 			return
 		}
 	}
@@ -104,7 +104,7 @@ func (c *Cache) EvictOne() {
 		entry := element.Value.(*CacheEntry)
 		c.evictionList.Remove(element)
 		delete(c.items, entry.key)
-		delete(c.accessOrder, entry.key)
+		delete(c.lastAccessTime, entry.key)
 	}
 }
 
@@ -131,7 +131,7 @@ func (c *Cache) GetStatus() []map[string]any {
 			"key":             entry.key,
 			"consecutiveHits": entry.consecutiveHits,
 			"isBeingUsed":     entry.isBeingUsed,
-			"lastAccessed":    c.accessOrder[entry.key],
+			"lastAccessed":    c.lastAccessTime[entry.key],
 		}
 		status = append(status, item)
 	}
@@ -145,7 +145,7 @@ func (c *Cache) Clear() {
 
 	c.items = make(map[string]*list.Element)
 	c.evictionList = list.New()
-	c.accessOrder = make(map[string]time.Time)
+	c.lastAccessTime = make(map[string]time.Time)
 }
 
 var cacheManager = NewCache()
@@ -209,7 +209,7 @@ func heavyMessage(c *gin.Context) {
 		isBeingUsed = entry.isBeingUsed
 
 		cacheManager.evictionList.MoveToFront(element)
-		cacheManager.accessOrder[cacheKey] = time.Now()
+		cacheManager.lastAccessTime[cacheKey] = time.Now()
 	} else {
 		message = simulateHeavyComputation(messageKey)
 		source = "computed and stored in cache"
@@ -228,7 +228,7 @@ func heavyMessage(c *gin.Context) {
 		element = cacheManager.evictionList.PushFront(entry)
 		cacheManager.items[cacheKey] = element
 		consecutiveHits = 1
-		cacheManager.accessOrder[cacheKey] = time.Now()
+		cacheManager.lastAccessTime[cacheKey] = time.Now()
 	}
 	cacheManager.mu.Unlock()
 
