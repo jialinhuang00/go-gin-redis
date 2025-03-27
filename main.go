@@ -111,7 +111,6 @@ func (c *Cache) EvictOne() {
 func (c *Cache) ResetConsecutiveHits(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	fmt.Print("its outdated reset hit = 1", key)
 	if element, exists := c.items[key]; exists {
 		entry := element.Value.(*CacheEntry)
 		entry.consecutiveHits = 1
@@ -149,8 +148,6 @@ func (c *Cache) Clear() {
 }
 
 var cacheManager = NewCache()
-var lastAccessedKeys = make(map[string]time.Time)
-var lastAccessMu sync.RWMutex
 
 func simulateHeavyComputation(key string) string {
 	time.Sleep(3 * time.Second)
@@ -164,19 +161,10 @@ func heavyMessage(c *gin.Context) {
 	messageKey := c.DefaultQuery("key", "default")
 	cacheKey := fmt.Sprintf("heavy-message-%s", messageKey)
 
-	lastAccessMu.RLock()
-	lastAccess, lastAccessExists := lastAccessedKeys[cacheKey]
-	lastAccessMu.RUnlock()
-
 	// Get current expiration time
 	expirationTimeMu.RLock()
 	currentExpirationTime := expirationTime
 	expirationTimeMu.RUnlock()
-
-	// update last access time
-	lastAccessMu.Lock()
-	lastAccessedKeys[cacheKey] = time.Now()
-	lastAccessMu.Unlock()
 
 	var message string
 	var source string
@@ -187,12 +175,12 @@ func heavyMessage(c *gin.Context) {
 	element, hit := cacheManager.items[cacheKey]
 	if hit {
 		entry := element.Value.(*CacheEntry)
+		lastAccess := cacheManager.lastAccessTime[cacheKey]
 
-		// if it's oudated or doesn't exist?
-		if !lastAccessExists || time.Since(lastAccess) > currentExpirationTime {
+		// it's outdated?
+		if time.Since(lastAccess) > currentExpirationTime {
 			entry.consecutiveHits = 1
 			entry.isBeingUsed = false
-			fmt.Print("its outdated reset hit = 1", cacheKey)
 			// its' fresh
 		} else {
 			entry.consecutiveHits++
@@ -284,10 +272,6 @@ func status(c *gin.Context) {
 // clean all
 func prune(c *gin.Context) {
 	cacheManager.Clear()
-
-	lastAccessMu.Lock()
-	lastAccessedKeys = make(map[string]time.Time)
-	lastAccessMu.Unlock()
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Cache cleaned up successfully",
