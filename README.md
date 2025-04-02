@@ -1,36 +1,51 @@
-# Download and run
+# Go Gin Cache
+
+A simple caching system implemented in Go using Gin framework. It demonstrates a basic caching mechanism with features like cache expiration, LRU eviction, and consecutive hits tracking.
+
+## Feat
+
+- Cache size limit (5 items). it's a constant
+- LRU (Least Recently Used) eviction policy
+- Cache expiration time (default 30 seconds) with POST /expirationTime
+- Consecutive hits tracking
+- Cache status monitoring
+- Cache cleanup functionality
+
+
+## Download and run
 0. clone
 1. go mod tidy (if needed)
 2. go run main go
 
-# Curl
-local run: `curl localhost`
+## Curl
 
-0. health-check 
-    ```
-    curl https://gin.jialin00.com/
-    ```
-1. try getting time-consuming resource
-    ```
-    curl https://gin.jialin00.com/heavy?key=whateveryyouwant
-    ```
-2. cleanup
-    ```
-    curl https://gin.jialin00.com/prune
-    ```
+1. Heavy Message Endpoint
+```bash
+curl "http://localhost/heavy?key=test1"
+```
 
-2. get cache status
-    ```
-    curl https://gin.jialin00.com/status
-    ```
-3. set expiration time
-    ```
-    curl -X POST \
-    http://gin.jialin00.com/expirationTime \
-    -H 'Content-Type: application/json' \
-    -d '{"time": 8}'
-    ```
+2. Cache Status Endpoint
+```bash
+curl "http://localhost/status"
+```
 
-# Or Website
+3. Cache Cleanup Endpoint
+```bash
+curl "http://localhost/prune"
+```
+
+4. Health Check Endpoint
+```bash
+curl "http://localhost/"
+```
+
+5. Set Expiration Time Endpoint
+```bash
+curl -X POST "http://localhost/expirationTime" \
+     -H "Content-Type: application/json" \
+     -d '{"time": 60}'
+```
+
+## Or Website (pair with this local server)
 https://jialin00.com/gin-redis
  
