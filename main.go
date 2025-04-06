@@ -1,11 +1,14 @@
 package main
 
 import (
-	"container/list"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+
+	"go-gin-cache/pkg/cache"
+	"go-gin-cache/pkg/source"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -18,103 +21,20 @@ const CACHE_SIZE = 5
 var expirationTime = 30 * time.Second
 var expirationTimeMu sync.RWMutex
 
-type CacheEntry struct {
-	key             string
-	value           string
-	consecutiveHits int
-	isBeingUsed     bool
-}
-
-type Cache struct {
-	mu             sync.RWMutex
-	items          map[string]*list.Element
-	evictionList   *list.List // LRU
-	lastAccessTime map[string]time.Time
-}
-
-func NewCache() *Cache {
-	return &Cache{
-		items:          make(map[string]*list.Element),
-		evictionList:   list.New(),
-		lastAccessTime: make(map[string]time.Time),
-	}
-}
-
-func (c *Cache) Add(key, value string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// no room to store, delete one
-	if c.evictionList.Len() >= CACHE_SIZE {
-		c.EvictOne()
-	}
-
-	entry := &CacheEntry{
-		key:             key,
-		value:           value,
-		consecutiveHits: 1,
-		isBeingUsed:     false,
-	}
-
-	element := c.evictionList.PushFront(entry)
-	c.items[key] = element
-	c.lastAccessTime[key] = time.Now()
-}
-
-func (c *Cache) EvictOne() {
-	// delete existing but not being used.
-	for e := c.evictionList.Back(); e != nil; e = e.Prev() {
-		entry := e.Value.(*CacheEntry)
-		if !entry.isBeingUsed {
-			c.evictionList.Remove(e)
-			delete(c.items, entry.key)
-			delete(c.lastAccessTime, entry.key)
-			return
-		}
-	}
-	// if all are being used, just check the last one.
-	if element := c.evictionList.Back(); element != nil {
-		entry := element.Value.(*CacheEntry)
-		c.evictionList.Remove(element)
-		delete(c.items, entry.key)
-		delete(c.lastAccessTime, entry.key)
-	}
-}
-
-func (c *Cache) GetStatus() []map[string]any {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	status := make([]map[string]any, 0, c.evictionList.Len())
-
-	for e := c.evictionList.Front(); e != nil; e = e.Next() {
-		entry := e.Value.(*CacheEntry)
-		item := map[string]any{
-			"key":             entry.key,
-			"consecutiveHits": entry.consecutiveHits,
-			"isBeingUsed":     entry.isBeingUsed,
-			"lastAccessed":    c.lastAccessTime[entry.key],
-		}
-		status = append(status, item)
-	}
-
-	return status
-}
-
-func (c *Cache) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.items = make(map[string]*list.Element)
-	c.evictionList = list.New()
-	c.lastAccessTime = make(map[string]time.Time)
-}
-
-var cacheManager = NewCache()
+var cacheManager = cache.New(CACHE_SIZE)
+var anotherCacheManager = cache.New(CACHE_SIZE)
 
 func simulateHeavyComputation(key string) string {
 	time.Sleep(3 * time.Second)
 	return fmt.Sprintf("heavy message %s", key)
+}
+
+// getCacheManager returns the appropriate cache manager based on the endpoint
+func getCacheManager(endpoint string) *cache.Cache {
+	if strings.Contains(endpoint, "another") {
+		return anotherCacheManager
+	}
+	return cacheManager
 }
 
 // handler
@@ -122,7 +42,7 @@ func heavyMessage(c *gin.Context) {
 	startTime := time.Now()
 
 	messageKey := c.DefaultQuery("key", "default")
-	cacheKey := fmt.Sprintf("heavy-message-%s", messageKey)
+	cacheKey := fmt.Sprintf("%s-message-%s", c.Request.URL.Path, messageKey)
 
 	// Get current expiration time
 	expirationTimeMu.RLock()
@@ -130,43 +50,33 @@ func heavyMessage(c *gin.Context) {
 	expirationTimeMu.RUnlock()
 
 	var message string
-	var source string
+	var cacheSource source.CacheSource
 	var isBeingUsed bool = false
 	var consecutiveHits int = 0
 
-	cacheManager.mu.Lock()
-	element, hit := cacheManager.items[cacheKey]
-	if hit {
-		entry := element.Value.(*CacheEntry)
-		lastAccess := cacheManager.lastAccessTime[cacheKey]
+	manager := getCacheManager(c.Request.URL.Path)
+
+	// Check if key exists in cache
+	if value, exists := manager.Get(cacheKey); exists {
+		lastAccess, _ := manager.GetLastAccessTime(cacheKey)
 
 		// it's outdated?
 		if time.Since(lastAccess) > currentExpirationTime {
-			entry.consecutiveHits = 1
-			entry.isBeingUsed = false
-			// its' fresh
+			manager.ResetConsecutiveHits(cacheKey)
+			consecutiveHits = 1
 		} else {
-			entry.consecutiveHits++
+			manager.IncrementConsecutiveHits(cacheKey)
+			consecutiveHits, _ = manager.GetConsecutiveHits(cacheKey)
 		}
 
-		message = entry.value
-		source = "cache"
-		consecutiveHits = entry.consecutiveHits
-
-		if entry.consecutiveHits >= 2 {
-			entry.isBeingUsed = true
-		}
-		isBeingUsed = entry.isBeingUsed
-
-		cacheManager.evictionList.MoveToFront(element)
-		cacheManager.lastAccessTime[cacheKey] = time.Now()
-	}
-	cacheManager.mu.Unlock()
-
-	if !hit {
+		message = value
+		cacheSource = source.Hit
+		isBeingUsed = consecutiveHits >= 2
+		manager.Update(cacheKey, value)
+	} else {
 		message = simulateHeavyComputation(messageKey)
-		source = "computed and stored in cache"
-		cacheManager.Add(cacheKey, message)
+		cacheSource = source.Computed
+		manager.Add(cacheKey, message)
 		consecutiveHits = 1
 	}
 
@@ -175,11 +85,11 @@ func heavyMessage(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"key":             messageKey,
 		"message":         message,
-		"source":          source,
+		"source":          cacheSource,
 		"duration":        duration.Seconds(),
 		"isBeingUsed":     isBeingUsed,
 		"consecutiveHits": consecutiveHits,
-		"cacheSize":       cacheManager.evictionList.Len(),
+		"cacheSize":       manager.Len(),
 		"maxSize":         CACHE_SIZE,
 	})
 }
@@ -224,9 +134,11 @@ func status(c *gin.Context) {
 	currentExpirationTime := expirationTime
 	expirationTimeMu.RUnlock()
 
+	manager := getCacheManager(c.Request.URL.Path)
+
 	c.JSON(http.StatusOK, gin.H{
-		"cacheStatus":    cacheManager.GetStatus(),
-		"cacheSize":      cacheManager.evictionList.Len(),
+		"cacheStatus":    manager.GetStatus(),
+		"cacheSize":      manager.Len(),
 		"maxSize":        CACHE_SIZE,
 		"expirationTime": int(currentExpirationTime.Seconds()),
 	})
@@ -234,7 +146,8 @@ func status(c *gin.Context) {
 
 // clean all
 func prune(c *gin.Context) {
-	cacheManager.Clear()
+	manager := getCacheManager(c.Request.URL.Path)
+	manager.Clear()
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Cache cleaned up successfully",
@@ -259,11 +172,19 @@ func main() {
 		MaxAge:           12 * 60 * 60,
 	}))
 
+	// First set of endpoints
 	r.GET("/heavy", heavyMessage)
-	r.GET("/status", status)
-	r.GET("/prune", prune)
+	r.GET("/heavy/status", status)
+	r.GET("/heavy/prune", prune)
+	r.POST("/heavy/expiration", setExpirationTime)
+
+	// Second set of endpoints
+	r.GET("/another-heavy", heavyMessage)
+	r.GET("/another-heavy/status", status)
+	r.GET("/another-heavy/prune", prune)
+	r.POST("/another-heavy/expiration", setExpirationTime)
+
 	r.GET("/", health)
-	r.POST("/expirationTime", setExpirationTime)
 
 	r.Run(":80")
 }
